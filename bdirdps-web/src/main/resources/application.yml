@@ -1,0 +1,294 @@
+# SpringBoot应用配置
+server:
+  port: 8080
+  tomcat:
+    max-connections: 8192
+    accept-count: 100
+    max-threads: 200
+    min-spare-threads: 10
+
+# Spring配置
+spring:
+  application:
+    name: bdir-dps-web
+
+  profiles:
+    active: dev
+
+  # 数据源配置
+  datasource:
+    url: jdbc:mysql://localhost:3306/bdir_dps?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: bdir_user
+    password: bdir_pass
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    type: com.zaxxer.hikari.HikariDataSource
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      connection-test-query: SELECT 1
+
+  # Redis配置
+  redis:
+    host: localhost
+    port: 6379
+    password:
+    database: 0
+    timeout: 5000
+    lettuce:
+      pool:
+        max-active: 20
+        max-idle: 10
+        min-idle: 0
+        max-wait: 1000ms
+
+  # Kafka配置
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      retries: 3
+      batch-size: 16384
+      buffer-memory: 33554432
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      compression-type: snappy
+      enable-idempotence: true
+    consumer:
+      group-id: bdir-dps-consumer
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      max-poll-records: 500
+      session-timeout-ms: 30000
+      heartbeat-interval-ms: 10000
+
+  # WebSocket配置
+  websocket:
+    message-size-limit: 8192
+    send-time-limit: 10000
+    send-buffer-size-limit: 524288
+
+# MyBatis Plus配置
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: false
+    call-setters-on-nulls: true
+    jdbc-type-for-null: 'null'
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: ASSIGN_ID
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# Hive配置
+hive:
+  url: jdbc:hive2://localhost:10000/default
+  username: hive
+  password: hive
+  driver-class-name: org.apache.hive.jdbc.HiveDriver
+
+# Hadoop配置
+hadoop:
+  name-node: hdfs://localhost:9000
+  user: ${user.name}
+
+# 应用配置
+app:
+  sensor-data:
+    batch-size: 1000
+    flush-interval: 5000
+    retention-days: 90
+  robot-control:
+    command-timeout: 30
+    heartbeat-interval: 30000
+    max-retry: 3
+
+# 监控配置
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: always
+    metrics:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+# 日志配置
+logging:
+  level:
+    com.bdir.dps: INFO
+    org.springframework.web: INFO
+    org.mybatis: WARN
+    org.apache.kafka: WARN
+    org.apache.hadoop: WARN
+    org.apache.hive: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    path: ${APP_LOG_DIR:/var/log/bdir-dps}
+    name: ${spring.application.name}.log
+    max-size: 100MB
+    max-history: 30
+
+# 流处理配置
+stream:
+  processing:
+    batch-size: 100
+    flush-interval: 5000
+    consumer-threads: 3
+    max-retries: 3
+    retry-interval: 1000
+
+# 批处理配置
+batch:
+  processing:
+    chunk-size: 1000
+    retention-days: 90
+    daily-cron: "0 0 2 * * ?"
+    weekly-cron: "0 0 3 * * MON"
+    monthly-cron: "0 0 4 1 * ?"
+
+# Swagger配置
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    enabled: true
+
+# 自定义线程池配置
+async:
+  executor:
+    core-pool-size: 10
+    max-pool-size: 50
+    queue-capacity: 1000
+    thread-name-prefix: BDIR-Async-
+
+# WebSocket端点配置
+websocket:
+  endpoint: /ws
+  allowed-origins: "*"
+
+# 缓存配置
+spring:
+  cache:
+    type: redis
+    redis:
+      time-to-live: 3600000 # 1小时
+      cache-null-values: false
+      key-prefix: bdir:cache:
+
+# 安全配置（示例）
+security:
+  basic:
+    enabled: false
+
+# 文件上传配置
+spring:
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+
+# 国际化配置
+spring:
+  messages:
+    basename: i18n/messages
+    encoding: UTF-8
+    cache-duration: 3600
+
+# Jackson配置
+spring:
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+      write-date-timestamps-as-nanoseconds: false
+    deserialization:
+      read-date-timestamps-as-nanoseconds: false
+
+# 自定义配置
+info:
+  app:
+    name: ${spring.application.name}
+    description: 大数据智能机器人数据处理系统
+    version: 1.0.0
+    author: BDIR Team
+
+# 外部化配置支持
+---
+spring:
+  profiles: dev
+  datasource:
+    url: jdbc:mysql://localhost:3306/bdir_dps?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: bdir_user
+    password: bdir_pass
+
+---
+spring:
+  profiles: test
+  datasource:
+    url: jdbc:mysql://localhost:3306/bdir_dps_test?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: bdir_user
+    password: bdir_pass
+
+---
+spring:
+  profiles: prod
+  datasource:
+    url: jdbc:mysql://prod-mysql:3306/bdir_dps?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: ${DB_USERNAME:bdir_user}
+    password: ${DB_PASSWORD:bdir_pass}
+
+# Docker环境配置
+---
+spring:
+  profiles: docker
+  datasource:
+    url: jdbc:mysql://mysql:3306/bdir_dps?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: bdir_user
+    password: bdir_pass
+  redis:
+    host: redis
+    port: 6379
+  kafka:
+    bootstrap-servers: kafka:29092
+  hive:
+    url: jdbc:hive2://hive-server:10000/default
+  hadoop:
+    name-node: hdfs://namenode:9000
+
+# Kubernetes环境配置
+---
+spring:
+  profiles: k8s
+  datasource:
+    url: jdbc:mysql://${MYSQL_SERVICE_HOST:mysql}:${MYSQL_SERVICE_PORT:3306}/bdir_dps?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: ${MYSQL_USER:bdir_user}
+    password: ${MYSQL_PASSWORD:bdir_pass}
+  redis:
+    host: ${REDIS_SERVICE_HOST:redis}
+    port: ${REDIS_SERVICE_PORT:6379}
+  kafka:
+    bootstrap-servers: ${KAFKA_SERVICE_HOST:kafka}:${KAFKA_SERVICE_PORT:9092}
+  hive:
+    url: jdbc:hive2://${HIVE_SERVICE_HOST:hive-server}:${HIVE_SERVICE_PORT:10000}/default
+  hadoop:
+    name-node: hdfs://${HADOOP_NAMENODE_SERVICE_HOST:namenode}:${HADOOP_NAMENODE_SERVICE_PORT:9000}
