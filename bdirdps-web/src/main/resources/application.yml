@@ -195,6 +195,30 @@ spring:
 
 # 安全配置（示例）
 security:
+  jwt:
+    secret: BDIRSecretKey2026ForJWTTokenGenerationAndValidation
+    expiration: 86400000 # 24小时
+    refresh-expiration: 604800000 # 7天
+
+# 数据压缩配置
+data:
+  compression:
+    enabled: true
+    algorithm: GZIP
+    threshold:
+      days: 30
+    delete-original: false
+    buffer-size: 8192
+
+# 数据备份配置
+  backup:
+    enabled: true
+    location: /backup/bdir-dps
+    retention:
+      days: 30
+    cleanup:
+      cron: "0 0 2 * * ?" # 每天凌晨2点清理
+    temp-dir: /tmp/bdir-backup
   basic:
     enabled: false
 
