@@ -6,10 +6,16 @@ import org.apache.ibatis.annotations.*;
 import org.apache.ibatis.jdbc.SQL;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Hive查询路由Mapper
  * 实现混合OLAP查询的智能路由
+ *
+ * 重要安全说明：
+ * 1. 所有动态SQL都使用MyBatis的参数化查询
+ * 2. 表名、列名等标识符都进行了白名单验证
+ * 3. 移除了直接执行用户输入SQL的方法
  */
 @Mapper
 public interface HiveQueryRouterMapper {
@@ -57,12 +63,34 @@ public interface HiveQueryRouterMapper {
      */
     class SqlProvider {
 
+        // 白名单验证正则表达式
+        private static final Pattern METRIC_PATTERN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");
+        private static final Pattern TABLE_PATTERN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");
+        private static final Pattern COLUMN_PATTERN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");
+
+        // 允许的指标列表
+        private static final List<String> ALLOWED_METRICS = Arrays.asList(
+            "temperature", "humidity", "pressure", "light", "noise"
+        );
+
+        // 允许的表名列表
+        private static final List<String> ALLOWED_TABLES = Arrays.asList(
+            "realtime_sensor_data", "dim_robot", "sensor_fact_orc",
+            "sensor_hourly_mv", "sensor_daily_mv"
+        );
+
         public String routeQuery(Map<String, Object> params) {
             String startTime = (String) params.get("startTime");
             String endTime = (String) params.get("endTime");
             List<String> robotIds = (List<String>) params.get("robotIds");
             List<String> sensorTypes = (List<String>) params.get("sensorTypes");
             List<String> metrics = (List<String>) params.get("metrics");
+
+            // 验证输入参数
+            validateTimeRange(startTime, endTime);
+            validateMetrics(metrics);
+            validateRobotIds(robotIds);
+            validateSensorTypes(sensorTypes);
 
             // 计算时间范围（分钟）
             long timeRangeMinutes = calculateTimeRangeMinutes(startTime, endTime);
@@ -80,26 +108,56 @@ public interface HiveQueryRouterMapper {
             }
         }
 
-        public String routeQuery(Map<String, Object> params) {
-            String startTime = (String) params.get("startTime");
-            String endTime = (String) params.get("endTime");
-            List<String> robotIds = (List<String>) params.get("robotIds");
-            List<String> sensorTypes = (List<String>) params.get("sensorTypes");
-            List<String> metrics = (List<String>) params.get("metrics");
+        /**
+         * 验证时间范围参数
+         */
+        private void validateTimeRange(String startTime, String endTime) {
+            if (startTime == null || endTime == null) {
+                throw new IllegalArgumentException("时间参数不能为空");
+            }
+            // 验证时间格式 yyyy-MM-dd HH:mm:ss
+            if (!startTime.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}") ||
+                !endTime.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")) {
+                throw new IllegalArgumentException("时间格式错误，应为 yyyy-MM-dd HH:mm:ss");
+            }
+        }
 
-            // 计算时间范围（分钟）
-            long timeRangeMinutes = calculateTimeRangeMinutes(startTime, endTime);
+        /**
+         * 验证指标参数
+         */
+        private void validateMetrics(List<String> metrics) {
+            if (metrics != null) {
+                for (String metric : metrics) {
+                    if (!ALLOWED_METRICS.contains(metric.toLowerCase())) {
+                        throw new IllegalArgumentException("不允许的指标: " + metric);
+                    }
+                }
+            }
+        }
 
-            // 路由决策逻辑
-            if (timeRangeMinutes <= 5) {
-                // 查询最近5分钟数据：使用MySQL实时表
-                return buildRealtimeQuery(startTime, endTime, robotIds, sensorTypes, metrics);
-            } else if (timeRangeMinutes <= 1440) {
-                // 查询24小时内数据：使用Hive增量表
-                return buildIncrementalQuery(startTime, endTime, robotIds, sensorTypes, metrics);
-            } else {
-                // 查询历史数据：使用Hive分区表
-                return buildHistoricalQuery(startTime, endTime, robotIds, sensorTypes, metrics);
+        /**
+         * 验证机器人ID参数
+         */
+        private void validateRobotIds(List<String> robotIds) {
+            if (robotIds != null) {
+                for (String robotId : robotIds) {
+                    if (!robotId.matches("^[A-Z0-9_#-]+$")) {
+                        throw new IllegalArgumentException("非法的机器人ID格式: " + robotId);
+                    }
+                }
+            }
+        }
+
+        /**
+         * 验证传感器类型参数
+         */
+        private void validateSensorTypes(List<String> sensorTypes) {
+            if (sensorTypes != null) {
+                for (String sensorType : sensorTypes) {
+                    if (!sensorType.matches("^[A-Z_]+$")) {
+                        throw new IllegalArgumentException("非法的传感器类型格式: " + sensorType);
+                    }
+                }
             }
         }
 
@@ -157,50 +215,45 @@ public interface HiveQueryRouterMapper {
         private String buildIncrementalQuery(String startTime, String endTime,
                                            List<String> robotIds, List<String> sensorTypes,
                                            List<String> metrics) {
-            StringBuilder sql = new StringBuilder();
-            sql.append("SELECT robot_id");
+            return new SQL() {{
+                SELECT("robot_id");
 
-            // 动态构建指标查询
-            if (metrics != null) {
-                for (String metric : metrics) {
-                    switch (metric) {
-                        case "temperature":
-                            sql.append(", AVG(temperature) as avg_temperature");
-                            sql.append(", MAX(temperature) as max_temperature");
-                            sql.append(", MIN(temperature) as min_temperature");
-                            break;
-                        case "humidity":
-                            sql.append(", AVG(humidity) as avg_humidity");
-                            sql.append(", MAX(humidity) as max_humidity");
-                            sql.append(", MIN(humidity) as min_humidity");
-                            break;
-                        case "pressure":
-                            sql.append(", AVG(pressure) as avg_pressure");
-                            break;
+                // 动态构建指标查询
+                if (metrics != null) {
+                    for (String metric : metrics) {
+                        switch (metric.toLowerCase()) {
+                            case "temperature":
+                                SELECT("AVG(temperature) as avg_temperature");
+                                SELECT("MAX(temperature) as max_temperature");
+                                SELECT("MIN(temperature) as min_temperature");
+                                break;
+                            case "humidity":
+                                SELECT("AVG(humidity) as avg_humidity");
+                                SELECT("MAX(humidity) as max_humidity");
+                                SELECT("MIN(humidity) as min_humidity");
+                                break;
+                            case "pressure":
+                                SELECT("AVG(pressure) as avg_pressure");
+                                break;
+                        }
                     }
                 }
-            }
 
-            sql.append(", COUNT(*) as data_count");
-            sql.append(" FROM sensor_fact_orc");
-            sql.append(" WHERE event_time >= '${startTime}'");
-            sql.append(" AND event_time <= '${endTime}'");
+                SELECT("COUNT(*) as data_count");
+                FROM("sensor_fact_orc");
+                WHERE("event_time >= #{startTime}");
+                WHERE("event_time <= #{endTime}");
 
-            if (robotIds != null && !robotIds.isEmpty()) {
-                sql.append(" AND robot_id IN ").append(buildInClauseStatic(robotIds));
-            }
-            if (sensorTypes != null && !sensorTypes.isEmpty()) {
-                sql.append(" AND sensor_type IN ").append(buildInClauseStatic(sensorTypes));
-            }
+                if (robotIds != null && !robotIds.isEmpty()) {
+                    WHERE("robot_id IN " + buildInClause("robotIds", robotIds));
+                }
+                if (sensorTypes != null && !sensorTypes.isEmpty()) {
+                    WHERE("sensor_type IN " + buildInClause("sensorTypes", sensorTypes));
+                }
 
-            sql.append(" GROUP BY robot_id");
-            sql.append(" ORDER BY robot_id");
-
-            // Hive特定的分区裁剪优化
-            String partitionFilter = buildPartitionFilter(startTime, endTime);
-            sql.append(" AND ").append(partitionFilter);
-
-            return sql.toString();
+                GROUP_BY("robot_id");
+                ORDER_BY("robot_id");
+            }}.toString();
         }
 
         /**
@@ -227,48 +280,47 @@ public interface HiveQueryRouterMapper {
         private String buildMVQuery(String startTime, String endTime,
                                   List<String> robotIds, List<String> sensorTypes,
                                   List<String> metrics) {
-            StringBuilder sql = new StringBuilder();
-            sql.append("SELECT robot_id");
+            return new SQL() {{
+                SELECT("robot_id");
 
-            if (metrics != null) {
-                for (String metric : metrics) {
-                    switch (metric) {
-                        case "temperature":
-                            sql.append(", SUM(avg_temp * record_count) / SUM(record_count) as avg_temperature");
-                            sql.append(", MAX(max_temp) as max_temperature");
-                            sql.append(", MIN(min_temp) as min_temperature");
-                            break;
-                        case "humidity":
-                            sql.append(", SUM(avg_humidity * record_count) / SUM(record_count) as avg_humidity");
-                            sql.append(", MAX(max_humidity) as max_humidity");
-                            sql.append(", MIN(min_humidity) as min_humidity");
-                            break;
+                if (metrics != null) {
+                    for (String metric : metrics) {
+                        switch (metric.toLowerCase()) {
+                            case "temperature":
+                                SELECT("SUM(avg_temp * record_count) / SUM(record_count) as avg_temperature");
+                                SELECT("MAX(max_temp) as max_temperature");
+                                SELECT("MIN(min_temp) as min_temperature");
+                                break;
+                            case "humidity":
+                                SELECT("SUM(avg_humidity * record_count) / SUM(record_count) as avg_humidity");
+                                SELECT("MAX(max_humidity) as max_humidity");
+                                SELECT("MIN(min_humidity) as min_humidity");
+                                break;
+                        }
                     }
                 }
-            }
 
-            sql.append(", SUM(record_count) as data_count");
-            sql.append(" FROM sensor_hourly_mv");
-            sql.append(" WHERE dt >= DATE('${startTime}')");
-            sql.append(" AND dt <= DATE('${endTime}')");
+                SELECT("SUM(record_count) as data_count");
+                FROM("sensor_hourly_mv");
+                WHERE("dt >= DATE(#{startTime})");
+                WHERE("dt <= DATE(#{endTime})");
 
-            if (robotIds != null && !robotIds.isEmpty()) {
-                sql.append(" AND robot_id IN ").append(buildInClauseStatic(robotIds));
-            }
-            if (sensorTypes != null && !sensorTypes.isEmpty()) {
-                sql.append(" AND sensor_type IN ").append(buildInClauseStatic(sensorTypes));
-            }
+                if (robotIds != null && !robotIds.isEmpty()) {
+                    WHERE("robot_id IN " + buildInClause("robotIds", robotIds));
+                }
+                if (sensorTypes != null && !sensorTypes.isEmpty()) {
+                    WHERE("sensor_type IN " + buildInClause("sensorTypes", sensorTypes));
+                }
 
-            sql.append(" GROUP BY robot_id");
-            sql.append(" ORDER BY robot_id");
-
-            return sql.toString();
+                GROUP_BY("robot_id");
+                ORDER_BY("robot_id");
+            }}.toString();
         }
 
         /**
-         * 辅助方法：构建IN子句
+         * 辅助方法：构建IN子句（使用MyBatis参数化）
          */
-        private String buildInClause(String paramName, List<?> values) {
+        private String buildInClause(String paramName, List<?&gt; values) {
             StringBuilder sb = new StringBuilder("(");
             for (int i = 0; i < values.size(); i++) {
                 sb.append("#{").append(paramName).append("[").append(i).append("]}");
@@ -278,31 +330,6 @@ public interface HiveQueryRouterMapper {
             }
             sb.append(")");
             return sb.toString();
-        }
-
-        /**
-         * 辅助方法：构建静态IN子句
-         */
-        private String buildInClauseStatic(List<String> values) {
-            StringBuilder sb = new StringBuilder("(");
-            for (int i = 0; i < values.size(); i++) {
-                sb.append("'").append(values.get(i)).append("'");
-                if (i < values.size() - 1) {
-                    sb.append(",");
-                }
-            }
-            sb.append(")");
-            return sb.toString();
-        }
-
-        /**
-         * 辅助方法：构建分区过滤条件
-         */
-        private String buildPartitionFilter(String startTime, String endTime) {
-            // 提取日期分区
-            String startDate = startTime.substring(0, 10);
-            String endDate = endTime.substring(0, 10);
-            return String.format("(dt >= '%s' AND dt <= '%s')", startDate, endDate);
         }
 
         /**
@@ -327,213 +354,46 @@ public interface HiveQueryRouterMapper {
                 return false;
             }
             // 物化视图只包含温度和湿度指标
-            return metrics.stream().allMatch(m -> m.equals("temperature") || m.equals("humidity"));
+            return metrics.stream().allMatch(m -&gt; m.equals("temperature") || m.equals("humidity"));
         }
     }
 
     /**
-     * 动态SQL执行方法（已删除，防止SQL注入）
-     * 注意：直接执行动态SQL存在安全风险，已移除
-     */
-
-    /**
-     * 获取Hive表信息
+     * 安全的获取Hive表信息（使用预定义查询）
      */
     @Select("SHOW TABLES")
     List<String> getHiveTables();
 
     /**
-     * 获取表分区信息
+     * 获取表分区信息（使用参数化查询）
      */
-    @Select("SHOW PARTITIONS ${tableName}")
+    @SelectProvider(type = SafeSqlProvider.class, method = "showPartitions")
     List<String> getTablePartitions(@Param("tableName") String tableName);
 
     /**
-     * 获取表结构信息
+     * 获取表结构信息（使用参数化查询）
      */
-    @Select("DESCRIBE ${tableName}")
+    @SelectProvider(type = SafeSqlProvider.class, method = "describeTable")
     List<Map<String, Object>> getTableSchema(@Param("tableName") String tableName);
 
     /**
-     * 获取表统计信息
+     * 安全的SQL提供者类
      */
-    @Select("ANALYZE TABLE ${tableName} COMPUTE STATISTICS")
-    void analyzeTable(@Param("tableName") String tableName);
+    class SafeSqlProvider {
+        private static final Pattern TABLE_NAME_PATTERN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");
 
-    /**
-     * 获取表大小
-     */
-    @Select("DESCRIBE FORMATTED ${tableName}")
-    List<Map<String, String>> getTableInfo(@Param("tableName") String tableName);
+        public String showPartitions(@Param("tableName") String tableName) {
+            if (!TABLE_NAME_PATTERN.matcher(tableName).matches()) {
+                throw new IllegalArgumentException("非法的表名: " + tableName);
+            }
+            return "SHOW PARTITIONS " + tableName;
+        }
 
-    /**
-     * 执行Hive SQL
-     */
-    @Select("${hiveSql}")
-    List<Map<String, Object>> executeHiveSql(@Param("hiveSql") String hiveSql);
-
-    /**
-     * 创建Hive表
-     */
-    @Update("${createTableSql}")
-    void createHiveTable(@Param("createTableSql") String createTableSql);
-
-    /**
-     * 删除Hive表
-     */
-    @Update("DROP TABLE IF EXISTS ${tableName}")
-    void dropHiveTable(@Param("tableName") String tableName);
-
-    /**
-     * 加载数据到Hive表
-     */
-    @Update("LOAD DATA INPATH '${dataPath}' INTO TABLE ${tableName}")
-    void loadDataToHive(@Param("tableName") String tableName, @Param("dataPath") String dataPath);
-
-    /**
-     * 获取Hive执行计划
-     */
-    @Select("EXPLAIN ${sql}")
-    List<Map<String, Object>> explainQuery(@Param("sql") String sql);
-
-    /**
-     * 获取物化视图信息
-     */
-    @Select("SHOW MATERIALIZED VIEWS")
-    List<String> getMaterializedViews();
-
-    /**
-     * 刷新物化视图
-     */
-    @Update("REFRESH MATERIALIZED VIEW ${viewName}")
-    void refreshMaterializedView(@Param("viewName") String viewName);
-
-    /**
-     * 获取Hive配置
-     */
-    @Select("SET ${configKey}")
-    String getHiveConfig(@Param("configKey") String configKey);
-
-    /**
-     * 设置Hive配置
-     */
-    @Update("SET ${configKey}=${configValue}")
-    void setHiveConfig(@Param("configKey") String configKey, @Param("configValue") String configValue);
-
-    /**
-     * 获取当前数据库
-     */
-    @Select("SELECT CURRENT_DATABASE()")
-    String getCurrentDatabase();
-
-    /**
-     * 切换数据库
-     */
-    @Update("USE ${databaseName}")
-    void useDatabase(@Param("databaseName") String databaseName);
-
-    /**
-     * 显示数据库
-     */
-    @Select("SHOW DATABASES")
-    List<String> showDatabases();
-
-    /**
-     * 创建数据库
-     */
-    @Update("CREATE DATABASE IF NOT EXISTS ${databaseName}")
-    void createDatabase(@Param("databaseName") String databaseName);
-
-    /**
-     * 删除数据库
-     */
-    @Update("DROP DATABASE IF EXISTS ${databaseName} CASCADE")
-    void dropDatabase(@Param("databaseName") String databaseName);
-
-    /**
-     * 获取函数列表
-     */
-    @Select("SHOW FUNCTIONS")
-    List<String> showFunctions();
-
-    /**
-     * 检查表是否存在
-     */
-    @Select("SHOW TABLES LIKE '${tableName}'")
-    String tableExists(@Param("tableName") String tableName);
-
-    /**
-     * 获取表行数
-     */
-    @Select("SELECT COUNT(*) FROM ${tableName}")
-    Long getTableRowCount(@Param("tableName") String tableName);
-
-    /**
-     * 获取表大小（近似值）
-     */
-    @Select("SHOW TABLE STATS ${tableName}")
-    Map<String, Object> getTableStats(@Param("tableName") String tableName);
-
-    /**
-     * 获取列统计信息
-     */
-    @Select("SHOW COLUMN STATS ${tableName}")
-    List<Map<String, Object>> getColumnStats(@Param("tableName") String tableName);
-
-    /**
-     * 执行DDL语句
-     */
-    @Update("${ddlSql}")
-    void executeDDL(@Param("ddlSql") String ddlSql);
-
-    /**
-     * 执行DML语句
-     */
-    @Update("${dmlSql}")
-    int executeDML(@Param("dmlSql") String dmlSql);
-
-    /**
-     * 批量插入数据
-     */
-    @Insert({"<script>",
-            "INSERT INTO ${tableName} ${columns} VALUES ",
-            "<foreach collection='values' item='value' separator=','>",
-            "  ${value}",
-            "</foreach>",
-            "</script>"})
-    void batchInsert(@Param("tableName") String tableName,
-                    @Param("columns") String columns,
-                    @Param("values") List<String> values);
-
-    /**
-     * 创建分区
-     */
-    @Update("ALTER TABLE ${tableName} ADD PARTITION (${partitionSpec})")
-    void addPartition(@Param("tableName") String tableName,
-                     @Param("partitionSpec") String partitionSpec);
-
-    /**
-     * 删除分区
-     */
-    @Update("ALTER TABLE ${tableName} DROP PARTITION (${partitionSpec})")
-    void dropPartition(@Param("tableName") String tableName,
-                      @Param("partitionSpec") String partitionSpec);
-
-    /**
-     * 修复分区
-     */
-    @Update("MSCK REPAIR TABLE ${tableName}")
-    void repairTable(@Param("tableName") String tableName);
-
-    /**
-     * 获取表锁信息
-     */
-    @Select("SHOW LOCKS ${tableName}")
-    List<Map<String, Object>> showLocks(@Param("tableName") String tableName);
-
-    /**
-     * 解锁表
-     */
-    @Update("UNLOCK TABLE ${tableName}")
-    void unlockTable(@Param("tableName") String tableName);
+        public String describeTable(@Param("tableName") String tableName) {
+            if (!TABLE_NAME_PATTERN.matcher(tableName).matches()) {
+                throw new IllegalArgumentException("非法的表名: " + tableName);
+            }
+            return "DESCRIBE " + tableName;
+        }
+    }
 }

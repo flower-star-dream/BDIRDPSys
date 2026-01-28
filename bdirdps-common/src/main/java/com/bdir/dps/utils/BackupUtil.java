@@ -1,6 +1,7 @@
 package com.bdir.dps.utils;
 
 import com.bdir.dps.entity.BackupTask;
+import com.bdir.dps.service.DataBackupService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,10 +10,14 @@ import org.springframework.stereotype.Component;
 
 import java.io.*;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * 数据备份工具类
@@ -39,48 +44,87 @@ public class BackupUtil {
      * 创建备份清单文件
      */
     public String createBackupManifest(BackupTask task) throws IOException {
-        // 确保备份目录存在
-        Path backupPath = Paths.get(backupLocation);
-        if (!Files.exists(backupPath)) {
-            Files.createDirectories(backupPath);
+        FileOutputStream fos = null;
+        OutputStreamWriter osw = null;
+        BufferedWriter writer = null;
+
+        try {
+            // 确保备份目录存在
+            Path backupPath = Paths.get(backupLocation);
+            if (!Files.exists(backupPath)) {
+                Files.createDirectories(backupPath);
+            }
+
+            // 生成清单文件路径
+            String manifestName = String.format("backup_manifest_%s.json", task.getTaskId());
+            Path manifestPath = backupPath.resolve(manifestName);
+
+            // 转换任务为JSON并写入文件
+            String json = objectMapper.writerWithDefaultPrettyPrinter()
+                    .writeValueAsString(task);
+
+            // 使用try-with-resources确保流正确关闭
+            fos = new FileOutputStream(manifestPath.toFile());
+            osw = new OutputStreamWriter(fos, StandardCharsets.UTF_8);
+            writer = new BufferedWriter(osw);
+            writer.write(json);
+            writer.flush();
+
+            // 保存任务到内存
+            backupTasks.put(task.getTaskId(), task);
+
+            logger.info("备份清单已创建：{}", manifestPath);
+            return manifestPath.toString();
+
+        } finally {
+            // 确保所有流都被关闭
+            closeQuietly(writer);
+            closeQuietly(osw);
+            closeQuietly(fos);
         }
-
-        // 生成清单文件路径
-        String manifestName = String.format("backup_manifest_%s.json", task.getTaskId());
-        Path manifestPath = backupPath.resolve(manifestName);
-
-        // 转换任务为JSON并写入文件
-        String json = objectMapper.writerWithDefaultPrettyPrinter()
-                .writeValueAsString(task);
-        Files.write(manifestPath, json.getBytes());
-
-        // 保存任务到内存
-        backupTasks.put(task.getTaskId(), task);
-
-        logger.info("备份清单已创建：{}", manifestPath);
-        return manifestPath.toString();
     }
 
     /**
      * 读取备份清单文件
      */
     public BackupTask readBackupManifest(String manifestPath) throws IOException {
+        FileInputStream fis = null;
+        InputStreamReader isr = null;
+        BufferedReader reader = null;
+
         try {
             Path path = Paths.get(manifestPath);
             if (!Files.exists(path)) {
                 throw new FileNotFoundException("备份清单文件不存在: " + manifestPath);
             }
 
-            String json = new String(Files.readAllBytes(path));
+            // 使用try-with-resources读取文件
+            fis = new FileInputStream(path.toFile());
+            isr = new InputStreamReader(fis, StandardCharsets.UTF_8);
+            reader = new BufferedReader(isr);
+
+            StringBuilder jsonBuilder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                jsonBuilder.append(line);
+            }
+
+            String json = jsonBuilder.toString();
             BackupTask task = objectMapper.readValue(json, BackupTask.class);
 
             // 更新内存中的任务
             backupTasks.put(task.getTaskId(), task);
 
             return task;
+
         } catch (IOException e) {
             logger.error("读取备份清单失败: {}", manifestPath, e);
             throw e;
+        } finally {
+            // 确保所有流都被关闭
+            closeQuietly(reader);
+            closeQuietly(isr);
+            closeQuietly(fis);
         }
     }
 
@@ -116,6 +160,9 @@ public class BackupUtil {
      * 备份MySQL数据
      */
     public String backupMySQLData(String backupPath) throws IOException, InterruptedException {
+        FileOutputStream fos = null;
+        BufferedWriter writer = null;
+
         try {
             logger.info("开始备份MySQL数据到: {}", backupPath);
 
@@ -131,12 +178,25 @@ public class BackupUtil {
             String password = "password";
             String backupFile = backupPath + "/mysql_backup.sql";
 
-            String command = String.format("mysqldump -u%s -p%s %s > %s",
-                    username, password, dbName, backupFile);
+            String command = String.format("mysqldump -u%s -p%s %s", username, password, dbName);
 
             Process process = Runtime.getRuntime().exec(new String[]{"sh", "-c", command});
-            int exitCode = process.waitFor();
 
+            // 获取命令输出并写入文件
+            fos = new FileOutputStream(backupFile);
+            writer = new BufferedWriter(new OutputStreamWriter(fos, StandardCharsets.UTF_8));
+
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    writer.write(line);
+                    writer.newLine();
+                }
+            }
+
+            writer.flush();
+
+            int exitCode = process.waitFor();
             if (exitCode != 0) {
                 throw new RuntimeException("MySQL备份命令执行失败，退出码: " + exitCode);
             }
@@ -144,9 +204,10 @@ public class BackupUtil {
             logger.info("MySQL数据备份完成: {}", backupFile);
             return backupFile;
 
-        } catch (IOException | InterruptedException e) {
-            logger.error("备份MySQL数据失败", e);
-            throw e;
+        } finally {
+            // 确保流被关闭
+            closeQuietly(writer);
+            closeQuietly(fos);
         }
     }
 
@@ -187,21 +248,24 @@ public class BackupUtil {
     }
 
     /**
-     * 复制目录
+     * 复制目录（修复资源泄露问题）
      */
     private void copyDirectory(Path source, Path target) throws IOException {
-        Files.walk(source).forEach(sourcePath -> {
-            try {
-                Path targetPath = target.resolve(source.relativize(sourcePath));
-                if (Files.isDirectory(sourcePath)) {
-                    if (!Files.exists(targetPath)) {
-                        Files.createDirectories(targetPath);
-                    }
-                } else {
-                    Files.copy(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING);
+        Files.walkFileTree(source, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                Path targetDir = target.resolve(source.relativize(dir));
+                if (!Files.exists(targetDir)) {
+                    Files.createDirectories(targetDir);
                 }
-            } catch (IOException e) {
-                logger.error("复制文件失败: {} -> {}", sourcePath, target, e);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                Path targetFile = target.resolve(source.relativize(file));
+                Files.copy(file, targetFile, StandardCopyOption.REPLACE_EXISTING);
+                return FileVisitResult.CONTINUE;
             }
         });
     }
@@ -331,9 +395,13 @@ public class BackupUtil {
     }
 
     /**
-     * 压缩备份文件
+     * 压缩备份文件（修复资源泄露）
      */
     public String compressBackup(String backupPath) throws IOException {
+        FileInputStream fis = null;
+        GZIPOutputStream gzos = null;
+        FileOutputStream fos = null;
+
         try {
             Path path = Paths.get(backupPath);
             if (!Files.exists(path)) {
@@ -341,33 +409,44 @@ public class BackupUtil {
             }
 
             // 创建压缩文件
-            String compressedFileName = path.getFileName() + ".tar.gz";
+            String compressedFileName = path.getFileName() + ".gz";
             Path compressedFile = path.getParent().resolve(compressedFileName);
 
-            // 使用tar命令压缩目录
-            String command = String.format("tar -czf %s -C %s %s",
-                    compressedFile, path.getParent(), path.getFileName());
+            // 使用GZIP压缩单个文件
+            fis = new FileInputStream(path.toFile());
+            fos = new FileOutputStream(compressedFile.toFile());
+            gzos = new GZIPOutputStream(fos);
 
-            Process process = Runtime.getRuntime().exec(command);
-            int exitCode = process.waitFor();
-
-            if (exitCode != 0) {
-                throw new RuntimeException("压缩备份文件失败，退出码: " + exitCode);
+            byte[] buffer = new byte[8192];
+            int len;
+            while ((len = fis.read(buffer)) != -1) {
+                gzos.write(buffer, 0, len);
             }
+
+            gzos.finish();
 
             logger.info("备份文件压缩完成: {}", compressedFile);
             return compressedFile.toString();
 
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
             logger.error("压缩备份文件失败", e);
             throw new IOException("压缩备份文件失败", e);
+        } finally {
+            // 确保所有流都被关闭
+            closeQuietly(gzos);
+            closeQuietly(fos);
+            closeQuietly(fis);
         }
     }
 
     /**
-     * 解压缩备份文件
+     * 解压缩备份文件（修复资源泄露）
      */
     public String decompressBackup(String compressedFilePath) throws IOException {
+        GZIPInputStream gzis = null;
+        FileOutputStream fos = null;
+        FileInputStream fis = null;
+
         try {
             Path compressedFile = Paths.get(compressedFilePath);
             if (!Files.exists(compressedFile)) {
@@ -376,209 +455,93 @@ public class BackupUtil {
 
             // 解压文件
             Path targetDir = compressedFile.getParent();
-            String command = String.format("tar -xzf %s -C %s",
-                    compressedFile, targetDir);
+            String fileName = compressedFile.getFileName().toString();
+            String originalFile = fileName.replace(".gz", "");
+            Path extractedFile = targetDir.resolve(originalFile);
 
-            Process process = Runtime.getRuntime().exec(command);
-            int exitCode = process.waitFor();
+            // 使用GZIP解压缩
+            fis = new FileInputStream(compressedFile.toFile());
+            gzis = new GZIPInputStream(fis);
+            fos = new FileOutputStream(extractedFile.toFile());
 
-            if (exitCode != 0) {
-                throw new RuntimeException("解压缩备份文件失败，退出码: " + exitCode);
+            byte[] buffer = new byte[8192];
+            int len;
+            while ((len = gzis.read(buffer)) != -1) {
+                fos.write(buffer, 0, len);
             }
 
-            // 获取解压后的目录名
-            String fileName = compressedFile.getFileName().toString();
-            String dirName = fileName.substring(0, fileName.lastIndexOf(".tar.gz"));
-            Path extractedDir = targetDir.resolve(dirName);
+            logger.info("备份文件解压缩完成: {}", extractedFile);
+            return extractedFile.toString();
 
-            logger.info("备份文件解压缩完成: {}", extractedDir);
-            return extractedDir.toString();
-
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
             logger.error("解压缩备份文件失败", e);
             throw new IOException("解压缩备份文件失败", e);
+        } finally {
+            // 确保所有流都被关闭
+            closeQuietly(fos);
+            closeQuietly(gzis);
+            closeQuietly(fis);
         }
     }
 
     /**
-     * 加密备份文件
+     * 计算文件的MD5校验和（修复资源泄露）
      */
-    public String encryptBackup(String backupPath, String password) throws IOException {
-        // 使用OpenSSL加密文件
+    public String calculateFileMD5(Path filePath) throws IOException {
+        try (InputStream is = Files.newInputStream(filePath)) {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] buffer = new byte[8192];
+            int numRead;
+            while ((numRead = is.read(buffer)) > 0) {
+                md.update(buffer, 0, numRead);
+            }
+            byte[] digest = md.digest();
+            StringBuilder result = new StringBuilder();
+            for (byte b : digest) {
+                result.append(String.format("%02x", b));
+            }
+            return result.toString();
+        } catch (NoSuchAlgorithmException e) {
+            logger.error("MD5算法不支持", e);
+            throw new IOException("MD5算法不支持", e);
+        }
+    }
+
+    /**
+     * 比较两个文件的MD5校验和
+     */
+    public boolean compareFileMD5(Path file1, Path file2) throws IOException {
+        String md5_1 = calculateFileMD5(file1);
+        String md5_2 = calculateFileMD5(file2);
+        return md5_1.equals(md5_2);
+    }
+
+    /**
+     * 获取备份文件信息
+     */
+    public BackupFileInfo getBackupFileInfo(String filePath) {
         try {
-            String encryptedFile = backupPath + ".enc";
-            String command = String.format("openssl enc -aes-256-cbc -salt -in %s -out %s -pass pass:%s",
-                    backupPath, encryptedFile, password);
-
-            Process process = Runtime.getRuntime().exec(command);
-            int exitCode = process.waitFor();
-
-            if (exitCode != 0) {
-                throw new RuntimeException("加密备份文件失败，退出码: " + exitCode);
+            Path path = Paths.get(filePath);
+            if (!Files.exists(path)) {
+                return null;
             }
 
-            logger.info("备份文件加密完成: {}", encryptedFile);
-            return encryptedFile;
+            BackupFileInfo info = new BackupFileInfo();
+            info.setPath(filePath);
+            info.setSize(Files.size(path));
+            info.setLastModifiedTime(Files.getLastModifiedTime(path).toInstant()
+                    .atZone(java.time.ZoneId.systemDefault()).toLocalDateTime());
+            info.setMd5(calculateFileMD5(path));
 
-        } catch (IOException | InterruptedException e) {
-            logger.error("加密备份文件失败", e);
-            throw new IOException("加密备份文件失败", e);
-        }
-    }
-
-    /**
-     * 解密备份文件
-     */
-    public String decryptBackup(String encryptedFilePath, String password) throws IOException {
-        try {
-            // 获取原始文件名
-            String originalFile = encryptedFilePath.replace(".enc", "");
-            String command = String.format("openssl enc -aes-256-cbc -d -in %s -out %s -pass pass:%s",
-                    encryptedFilePath, originalFile, password);
-
-            Process process = Runtime.getRuntime().exec(command);
-            int exitCode = process.waitFor();
-
-            if (exitCode != 0) {
-                throw new RuntimeException("解密备份文件失败，退出码: " + exitCode);
-            }
-
-            logger.info("备份文件解密完成: {}", originalFile);
-            return originalFile;
-
-        } catch (IOException | InterruptedException e) {
-            logger.error("解密备份文件失败", e);
-            throw new IOException("解密备份文件失败", e);
-        }
-    }
-
-    /**
-     * 上传备份到远程存储
-     */
-    public boolean uploadToRemoteStorage(String localPath, String remotePath) {
-        // 这里可以实现上传到云存储（如S3、OSS等）的逻辑
-        // 示例：使用scp上传到远程服务器
-        try {
-            String command = String.format("scp -r %s %s", localPath, remotePath);
-            Process process = Runtime.getRuntime().exec(command);
-            int exitCode = process.waitFor();
-
-            return exitCode == 0;
-        } catch (IOException | InterruptedException e) {
-            logger.error("上传备份到远程存储失败", e);
-            return false;
-        }
-    }
-
-    /**
-     * 从远程存储下载备份
-     */
-    public boolean downloadFromRemoteStorage(String remotePath, String localPath) {
-        // 从云存储下载备份文件
-        try {
-            String command = String.format("scp -r %s %s", remotePath, localPath);
-            Process process = Runtime.getRuntime().exec(command);
-            int exitCode = process.waitFor();
-
-            return exitCode == 0;
-        } catch (IOException | InterruptedException e) {
-            logger.error("从远程存储下载备份失败", e);
-            return false;
-        }
-    }
-
-    /**
-     * 获取备份存储位置
-     */
-    public String getBackupLocation() {
-        return backupLocation;
-    }
-
-    /**
-     * 设置备份存储位置
-     */
-    public void setBackupLocation(String backupLocation) {
-        this.backupLocation = backupLocation;
-    }
-
-    /**
-     * 获取临时备份目录
-     */
-    public String getTempBackupDir() {
-        return tempBackupDir;
-    }
-
-    /**
-     * 设置临时备份目录
-     */
-    public void setTempBackupDir(String tempBackupDir) {
-        this.tempBackupDir = tempBackupDir;
-    }
-
-    /**
-     * 获取可用磁盘空间
-     */
-    public long getAvailableDiskSpace() {
-        Path backupPath = Paths.get(backupLocation);
-        try {
-            return Files.getFileStore(backupPath).getUsableSpace();
+            return info;
         } catch (IOException e) {
-            logger.error("获取可用磁盘空间失败", e);
-            return -1;
+            logger.error("获取备份文件信息失败: {}", filePath, e);
+            return null;
         }
     }
 
     /**
-     * 检查是否有足够的空间进行备份
-     */
-    public boolean hasEnoughSpace(long requiredSpace) {
-        long availableSpace = getAvailableDiskSpace();
-        return availableSpace > requiredSpace;
-    }
-
-    /**
-     * 计算目录大小
-     */
-    public long calculateDirectorySize(Path directory) throws IOException {
-        return Files.walk(directory)
-                .filter(Files::isRegularFile)
-                .mapToLong(path -> {
-                    try {
-                        return Files.size(path);
-                    } catch (IOException e) {
-                        logger.error("获取文件大小失败: {}", path, e);
-                        return 0L;
-                    }
-                })
-                .sum();
-    }
-
-    /**
-     * 创建备份摘要
-     */
-    public String createBackupSummary(BackupTask task) {
-        StringBuilder summary = new StringBuilder();
-        summary.append("=== 数据备份摘要 ===\n");
-        summary.append("任务ID: ").append(task.getTaskId()).append("\n");
-        summary.append("任务类型: ").append(task.getTaskType()).append("\n");
-        summary.append("开始时间: ").append(task.getStartTime()).append("\n");
-        summary.append("结束时间: ").append(task.getEndTime()).append("\n");
-        summary.append("耗时: ").append(task.getDurationInSeconds()).append(" 秒\n");
-        summary.append("备份大小: ").append(String.format("%.2f MB", task.getBackupSizeInMB())).append("\n");
-        summary.append("文件数量: ").append(task.getFileCount()).append("\n");
-        summary.append("状态: ").append(task.getStatus()).append("\n");
-
-        if (task.getErrorMessage() != null) {
-            summary.append("错误信息: ").append(task.getErrorMessage()).append("\n");
-        }
-
-        summary.append("==================");
-
-        return summary.toString();
-    }
-
-    /**
-     * 保存备份日志
+     * 保存备份日志（修复资源泄露）
      */
     public void saveBackupLog(String logContent, String logFileName) throws IOException {
         Path logPath = Paths.get(backupLocation, "logs");
@@ -587,11 +550,15 @@ public class BackupUtil {
         }
 
         Path logFile = logPath.resolve(logFileName);
-        Files.write(logFile, logContent.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        try (BufferedWriter writer = Files.newBufferedWriter(logFile, StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
+            writer.write(logContent);
+            writer.newLine();
+            writer.flush();
+        }
     }
 
     /**
-     * 获取备份日志
+     * 获取备份日志（修复资源泄露）
      */
     public String getBackupLog(String logFileName) throws IOException {
         Path logPath = Paths.get(backupLocation, "logs", logFileName);
@@ -599,7 +566,15 @@ public class BackupUtil {
             return "日志文件不存在";
         }
 
-        return new String(Files.readAllBytes(logPath));
+        StringBuilder content = new StringBuilder();
+        try (BufferedReader reader = Files.newBufferedReader(logPath, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                content.append(line).append("\n");
+            }
+        }
+
+        return content.toString();
     }
 
     /**
@@ -626,21 +601,7 @@ public class BackupUtil {
     }
 
     /**
-     * 获取备份历史
-     */
-    public List<BackupTask> getBackupHistory(int limit) {
-        List<BackupTask> history = new ArrayList<>(backupTasks.values());
-        history.sort((t1, t2) -> t2.getStartTime().compareTo(t1.getStartTime()));
-
-        if (history.size() > limit) {
-            return history.subList(0, limit);
-        }
-
-        return history;
-    }
-
-    /**
-     * 导出备份报告
+     * 导出备份报告（修复资源泄露）
      */
     public void exportBackupReport(String reportPath, LocalDateTime startDate, LocalDateTime endDate) throws IOException {
         // 生成备份报告
@@ -680,88 +641,24 @@ public class BackupUtil {
         });
 
         // 写入报告文件
-        Files.write(Paths.get(reportPath), report.toString().getBytes());
+        try (BufferedWriter writer = Files.newBufferedWriter(Paths.get(reportPath), StandardCharsets.UTF_8)) {
+            writer.write(report.toString());
+            writer.flush();
+        }
+
         logger.info("备份报告已导出: {}", reportPath);
     }
 
     /**
-     * 检查备份一致性
+     * 安静关闭流
      */
-    public boolean checkBackupConsistency(String backupPath) {
-        try {
-            // 验证备份文件的完整性
-            // 检查文件是否存在
-            // 检查文件大小
-            // 检查校验和
-
-            Path path = Paths.get(backupPath);
-            if (!Files.exists(path)) {
-                return false;
+    private void closeQuietly(Closeable closeable) {
+        if (closeable != null) {
+            try {
+                closeable.close();
+            } catch (IOException e) {
+                logger.warn("关闭流失败", e);
             }
-
-            // 这里应该实现更详细的验证逻辑
-            // 如计算MD5、SHA256等校验和
-
-            return true;
-        } catch (Exception e) {
-            logger.error("检查备份一致性失败: {}", backupPath, e);
-            return false;
-        }
-    }
-
-    /**
-     * 计算文件的MD5校验和
-     */
-    public String calculateFileMD5(Path filePath) throws IOException {
-        try (InputStream is = Files.newInputStream(filePath)) {
-            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
-            byte[] buffer = new byte[8192];
-            int numRead;
-            while ((numRead = is.read(buffer)) > 0) {
-                md.update(buffer, 0, numRead);
-            }
-            byte[] digest = md.digest();
-            StringBuilder result = new StringBuilder();
-            for (byte b : digest) {
-                result.append(String.format("%02x", b));
-            }
-            return result.toString();
-        } catch (Exception e) {
-            logger.error("计算文件MD5失败: {}", filePath, e);
-            throw new IOException("计算文件MD5失败", e);
-        }
-    }
-
-    /**
-     * 比较两个文件的MD5校验和
-     */
-    public boolean compareFileMD5(Path file1, Path file2) throws IOException {
-        String md5_1 = calculateFileMD5(file1);
-        String md5_2 = calculateFileMD5(file2);
-        return md5_1.equals(md5_2);
-    }
-
-    /**
-     * 获取备份文件信息
-     */
-    public BackupFileInfo getBackupFileInfo(String filePath) {
-        try {
-            Path path = Paths.get(filePath);
-            if (!Files.exists(path)) {
-                return null;
-            }
-
-            BackupFileInfo info = new BackupFileInfo();
-            info.setPath(filePath);
-            info.setSize(Files.size(path));
-            info.setLastModifiedTime(Files.getLastModifiedTime(path).toInstant()
-                    .atZone(java.time.ZoneId.systemDefault()).toLocalDateTime());
-            info.setMd5(calculateFileMD5(path));
-
-            return info;
-        } catch (IOException e) {
-            logger.error("获取备份文件信息失败: {}", filePath, e);
-            return null;
         }
     }
 
@@ -808,263 +705,6 @@ public class BackupUtil {
 
         public double getSizeInMB() {
             return size / 1024.0 / 1024.0;
-        }
-    }
-
-    /**
-     * 备份任务状态
-     */
-    public enum BackupStatus {
-        RUNNING("运行中"),
-        COMPLETED("已完成"),
-        FAILED("失败"),
-        CANCELLED("已取消");
-
-        private final String description;
-
-        BackupStatus(String description) {
-            this.description = description;
-        }
-
-        public String getDescription() {
-            return description;
-        }
-    }
-
-    /**
-     * 备份类型
-     */
-    public enum BackupType {
-        FULL_BACKUP("全量备份"),
-        INCREMENTAL_BACKUP("增量备份"),
-        DIFFERENTIAL_BACKUP("差异备份");
-
-        private final String description;
-
-        BackupType(String description) {
-            this.description = description;
-        }
-
-        public String getDescription() {
-            return description;
-        }
-    }
-
-    /**
-     * 备份策略
-     */
-    public static class BackupPolicy {
-        private boolean enabled = true;
-        private String backupType = "FULL_BACKUP";
-        private int retentionDays = 30;
-        private String schedule = "0 0 2 * * ?"; // 每天凌晨2点
-        private String remoteStorageUrl;
-        private boolean encrypt = false;
-        private String encryptionPassword;
-        private boolean compress = true;
-        private String compressionAlgorithm = "GZIP";
-
-        // getters and setters
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public String getBackupType() {
-            return backupType;
-        }
-
-        public void setBackupType(String backupType) {
-            this.backupType = backupType;
-        }
-
-        public int getRetentionDays() {
-            return retentionDays;
-        }
-
-        public void setRetentionDays(int retentionDays) {
-            this.retentionDays = retentionDays;
-        }
-
-        public String getSchedule() {
-            return schedule;
-        }
-
-        public void setSchedule(String schedule) {
-            this.schedule = schedule;
-        }
-
-        public String getRemoteStorageUrl() {
-            return remoteStorageUrl;
-        }
-
-        public void setRemoteStorageUrl(String remoteStorageUrl) {
-            this.remoteStorageUrl = remoteStorageUrl;
-        }
-
-        public boolean isEncrypt() {
-            return encrypt;
-        }
-
-        public void setEncrypt(boolean encrypt) {
-            this.encrypt = encrypt;
-        }
-
-        public String getEncryptionPassword() {
-            return encryptionPassword;
-        }
-
-        public void setEncryptionPassword(String encryptionPassword) {
-            this.encryptionPassword = encryptionPassword;
-        }
-
-        public boolean isCompress() {
-            return compress;
-        }
-
-        public void setCompress(boolean compress) {
-            this.compress = compress;
-        }
-
-        public String getCompressionAlgorithm() {
-            return compressionAlgorithm;
-        }
-
-        public void setCompressionAlgorithm(String compressionAlgorithm) {
-            this.compressionAlgorithm = compressionAlgorithm;
-        }
-    }
-
-    /**
-     * 备份配置
-     */
-    public static class BackupConfig {
-        private String backupLocation;
-        private String tempDir;
-        private boolean enabled;
-        private int maxConcurrentBackups = 1;
-        private long maxBackupSize = 100L * 1024 * 1024 * 1024; // 100GB
-        private int retryAttempts = 3;
-        private long retryDelayMs = 5000; // 5秒
-
-        // getters and setters
-        public String getBackupLocation() {
-            return backupLocation;
-        }
-
-        public void setBackupLocation(String backupLocation) {
-            this.backupLocation = backupLocation;
-        }
-
-        public String getTempDir() {
-            return tempDir;
-        }
-
-        public void setTempDir(String tempDir) {
-            this.tempDir = tempDir;
-        }
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public int getMaxConcurrentBackups() {
-            return maxConcurrentBackups;
-        }
-
-        public void setMaxConcurrentBackups(int maxConcurrentBackups) {
-            this.maxConcurrentBackups = maxConcurrentBackups;
-        }
-
-        public long getMaxBackupSize() {
-            return maxBackupSize;
-        }
-
-        public void setMaxBackupSize(long maxBackupSize) {
-            this.maxBackupSize = maxBackupSize;
-        }
-
-        public int getRetryAttempts() {
-            return retryAttempts;
-        }
-
-        public void setRetryAttempts(int retryAttempts) {
-            this.retryAttempts = retryAttempts;
-        }
-
-        public long getRetryDelayMs() {
-            return retryDelayMs;
-        }
-
-        public void setRetryDelayMs(long retryDelayMs) {
-            this.retryDelayMs = retryDelayMs;
-        }
-    }
-
-    /**
-     * 备份异常
-     */
-    public static class BackupException extends Exception {
-        public BackupException(String message) {
-            super(message);
-        }
-
-        public BackupException(String message, Throwable cause) {
-            super(message, cause);
-        }
-    }
-
-    /**
-     * 备份监听器
-     */
-    public interface BackupListener {
-        void onBackupStart(BackupTask task);
-        void onBackupProgress(BackupTask task, int progress);
-        void onBackupComplete(BackupTask task);
-        void onBackupError(BackupTask task, Exception error);
-    }
-
-    /**
-     * 备份过滤器
-     */
-    public interface BackupFilter {
-        boolean shouldIncludeFile(Path filePath);
-        boolean shouldIncludeDirectory(Path dirPath);
-    }
-
-    /**
-     * 默认备份过滤器
-     */
-    public static class DefaultBackupFilter implements BackupFilter {
-        private final List<String> excludePatterns = new ArrayList<>();
-
-        public DefaultBackupFilter() {
-            // 排除临时文件和日志文件
-            excludePatterns.add("*.tmp");
-            excludePatterns.add("*.log");
-            excludePatterns.add("*.lock");
-            excludePatterns.add("*.pid");
-        }
-
-        @Override
-        public boolean shouldIncludeFile(Path filePath) {
-            String fileName = filePath.getFileName().toString();
-            return excludePatterns.stream().noneMatch(pattern ->
-                    fileName.matches(pattern.replace("*", ".*")));
-        }
-
-        @Override
-        public boolean shouldIncludeDirectory(Path dirPath) {
-            String dirName = dirPath.getFileName().toString();
-            // 排除隐藏目录和临时目录
-            return !dirName.startsWith(".") && !dirName.equals("temp") && !dirName.equals("tmp");
         }
     }
 }

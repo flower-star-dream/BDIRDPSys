@@ -8,6 +8,8 @@ import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Component;
 
 import java.security.Key;
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.Date;
 
 /**
@@ -20,17 +22,32 @@ import java.util.Date;
 @Component
 public class JwtTokenProvider {
 
-    @Value("${app.jwt.secret:mySecretKey123456789012345678901234567890}")
+    @Value("${app.jwt.secret}")
     private String jwtSecret;
 
     @Value("${app.jwt.expiration:86400000}")
     private int jwtExpirationInMs;
 
     /**
-     * 生成JWT密钥
+     * 生成安全的JWT密钥
+     * 如果配置中没有提供密钥，则生成一个随机的256位密钥
      */
     private Key getSigningKey() {
+        // 如果密钥为空或太短，生成一个安全的随机密钥
+        if (jwtSecret == null || jwtSecret.length() < 32) {
+            jwtSecret = generateSecureKey();
+        }
         return Keys.hmacShaKeyFor(jwtSecret.getBytes());
+    }
+
+    /**
+     * 生成安全的随机密钥
+     */
+    private String generateSecureKey() {
+        SecureRandom random = new SecureRandom();
+        byte[] keyBytes = new byte[32]; // 256位
+        random.nextBytes(keyBytes);
+        return Base64.getEncoder().encodeToString(keyBytes);
     }
 
     /**
